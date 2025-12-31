@@ -2,10 +2,15 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const { Pool } = require('pg');
+const crypto = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server);
+
+// Middleware
+app.use(express.json());
+app.use(express.static('../zeuschat'));
 
 // Database connection
 const pool = new Pool({
@@ -15,18 +20,80 @@ const pool = new Pool({
 // Store active users
 const activeUsers = new Map(); // zeusPin -> socket.id
 
+// Generate unique Zeus-PIN
+function generateZeusPIN() {
+  const num = Math.floor(1000 + Math.random() * 9000);
+  const num2 = Math.floor(1000 + Math.random() * 9000);
+  return `ZT-${num}-${num2}`;
+}
+
+// Send OTP via SendGrid (simulated)
+async function sendOTP(email, otp) {
+  console.log(`📧 Sending OTP ${otp} to ${email}`);
+  // In real app: use SendGrid API
+  return true;
+}
+
 io.on('connection', (socket) => {
   console.log('New client connected:', socket.id);
 
-  // User registers with Zeus-PIN
-  socket.on('register', async ({ zeusPin, name, email }) => {
+  // User registers with email/phone → gets OTP
+  socket.on('requestOTP', async ({ email }) => {
+    try {
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      await sendOTP(email, otp);
+      
+      // Store OTP temporarily (10 min expiry)
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+      await pool.query(
+        'INSERT INTO otp_requests (email, otp, expires_at) VALUES ($1, $2, $3) ON CONFLICT (email) DO UPDATE SET otp = $2, expires_at = $3',
+        [email, otp, expiresAt]
+      );
+
+      socket.emit('otpSent', { email });
+    } catch (err) {
+      socket.emit('error', err.message);
+    }
+  });
+
+  // User verifies OTP
+  socket.on('verifyOTP', async ({ email, otp }) => {
     try {
       const result = await pool.query(
-        'INSERT INTO users (zeus_pin, name, email) VALUES ($1, $2, $3) ON CONFLICT (zeus_pin) DO UPDATE SET name = $2, email = $3 RETURNING id',
-        [zeusPin, name, email]
+        'SELECT * FROM otp_requests WHERE email = $1 AND otp = $2 AND expires_at > NOW()',
+        [email, otp]
+      );
+
+      if (result.rows.length === 0) {
+        socket.emit('otpError', 'Invalid or expired OTP');
+        return;
+      }
+
+      // Create user & generate Zeus-PIN
+      const zeusPin = generateZeusPIN();
+      const userResult = await pool.query(
+        'INSERT INTO users (zeus_pin, email, verified_at) VALUES ($1, $2, NOW()) ON CONFLICT (email) DO UPDATE SET zeus_pin = $1, verified_at = NOW() RETURNING *',
+        [zeusPin, email]
+      );
+
+      // Clean up OTP
+      await pool.query('DELETE FROM otp_requests WHERE email = $1', [email]);
+
+      socket.emit('otpVerified', { user: userResult.rows[0] });
+    } catch (err) {
+      socket.emit('error', err.message);
+    }
+  });
+
+  // User registers with Zeus-PIN
+  socket.on('register', async ({ zeusPin, name, about }) => {
+    try {
+      const result = await pool.query(
+        'UPDATE users SET name = $2, about = $3 WHERE zeus_pin = $1 RETURNING *',
+        [zeusPin, name, about]
       );
       activeUsers.set(zeusPin, socket.id);
-      socket.emit('registered', { userId: result.rows[0].id });
+      socket.emit('registered', { user: result.rows[0] });
     } catch (err) {
       socket.emit('error', err.message);
     }
@@ -44,7 +111,7 @@ io.on('connection', (socket) => {
 
       // Create pending invite
       await pool.query(
-        'INSERT INTO invites (from_pin, to_pin, status) VALUES ($1, $2, $3)',
+        'INSERT INTO invites (from_pin, to_pin, status) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
         [fromPin, toPin, 'pending']
       );
 
@@ -71,7 +138,7 @@ io.on('connection', (socket) => {
 
       // Create friendship record
       await pool.query(
-        'INSERT INTO friendships (user1_pin, user2_pin) VALUES ($1, $2)',
+        'INSERT INTO friendships (user1_pin, user2_pin) VALUES ($1, $2) ON CONFLICT DO NOTHING',
         [fromPin, toPin]
       );
 
@@ -101,8 +168,8 @@ io.on('connection', (socket) => {
       }
 
       // Save message
-      await pool.query(
-        'INSERT INTO messages (from_pin, to_pin, content, ttl, created_at) VALUES ($1, $2, $3, $4, NOW())',
+      const msgResult = await pool.query(
+        'INSERT INTO messages (from_pin, to_pin, content, ttl, created_at) VALUES ($1, $2, $3, $4, NOW()) RETURNING *',
         [fromPin, toPin, message, ttl]
       );
 
@@ -112,7 +179,8 @@ io.on('connection', (socket) => {
         io.to(toSocketId).emit('messageReceived', {
           fromPin,
           message,
-          ttl
+          ttl,
+          messageId: msgResult.rows[0].id
         });
       }
 
@@ -123,7 +191,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    // Remove from active users
     for (let [pin, id] of activeUsers.entries()) {
       if (id === socket.id) {
         activeUsers.delete(pin);
@@ -134,6 +201,32 @@ io.on('connection', (socket) => {
   });
 });
 
+// Serve frontend
+app.get('/', (req, res) => {
+  res.sendFile(__dirname + '/../zeuschat/index.html');
+});
+
+app.get('/login', (req, res) => {
+  res.sendFile(__dirname + '/../zeuschat/login.html');
+});
+
+app.get('/otp', (req, res) => {
+  res.sendFile(__dirname + '/../zeuschat/otp.html');
+});
+
+app.get('/profile', (req, res) => {
+  res.sendFile(__dirname + '/../zeuschat/profile.html');
+});
+
+app.get('/chat', (req, res) => {
+  res.sendFile(__dirname + '/../zeuschat/chat.html');
+});
+
+app.get('/settings', (req, res) => {
+  res.sendFile(__dirname + '/../zeuschat/settings.html');
+});
+
 server.listen(process.env.PORT, () => {
-  console.log(`🚀 ZeusChat Server running on port ${process.env.PORT}`);
+  console.log(`🚀 ZeusChat 1.0 Server running on port ${process.env.PORT}`);
+  console.log(`🌐 Live at: https://zeuschat-server.onrender.com`);
 });

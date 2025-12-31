@@ -2,7 +2,7 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const { Pool } = require('pg');
-const crypto = require('crypto');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
@@ -10,7 +10,7 @@ const io = socketIo(server);
 
 // Middleware
 app.use(express.json());
-app.use(express.static('../zeuschat'));
+app.use(express.static(path.join(__dirname, '../zeuschat')));
 
 // Database connection
 const pool = new Pool({
@@ -203,27 +203,27 @@ io.on('connection', (socket) => {
 
 // Serve frontend
 app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/../zeuschat/index.html');
+  res.sendFile(path.join(__dirname, '../zeuschat/index.html'));
 });
 
 app.get('/login', (req, res) => {
-  res.sendFile(__dirname + '/../zeuschat/login.html');
+  res.sendFile(path.join(__dirname, '../zeuschat/login.html'));
 });
 
 app.get('/otp', (req, res) => {
-  res.sendFile(__dirname + '/../zeuschat/otp.html');
+  res.sendFile(path.join(__dirname, '../zeuschat/otp.html'));
 });
 
 app.get('/profile', (req, res) => {
-  res.sendFile(__dirname + '/../zeuschat/profile.html');
+  res.sendFile(path.join(__dirname, '../zeuschat/profile.html'));
 });
 
 app.get('/chat', (req, res) => {
-  res.sendFile(__dirname + '/../zeuschat/chat.html');
+  res.sendFile(path.join(__dirname, '../zeuschat/chat.html'));
 });
 
 app.get('/settings', (req, res) => {
-  res.sendFile(__dirname + '/../zeuschat/settings.html');
+  res.sendFile(path.join(__dirname, '../zeuschat/settings.html'));
 });
 
 server.listen(process.env.PORT, () => {
